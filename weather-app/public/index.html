@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CosmoWeather — sleek weather</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .glass {
+      background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
+    .suggestion-enter { transform: translateY(-4px); opacity: 0; }
+    .suggestion-enter-active { transform: translateY(0); opacity: 1; transition: all 160ms ease; }
+    .suggestion-exit { opacity: 1; }
+    .suggestion-exit-active { opacity: 0; transition: opacity 120ms ease; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-sky-900 via-indigo-900 to-black text-white flex items-center justify-center p-6">
+  <main class="max-w-3xl w-full">
+    <div class="glass rounded-2xl p-6 shadow-2xl border border-white/6">
+      <header class="flex items-center justify-between mb-4">
+        <h1 class="text-2xl font-bold">CosmoWeather</h1>
+        <div class="flex items-center gap-3">
+          <small class="text-sm opacity-80">Fast • Free • No API key</small>
+          <label class="flex items-center gap-2 text-sm opacity-90">
+            <input id="unitToggle" type="checkbox" /> °F
+          </label>
+        </div>
+      </header>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-start mb-4 relative">
+        <div class="md:col-span-2 relative">
+          <input id="cityInput" type="search" placeholder="Enter city (try London, New York)" 
+                 class="w-full p-3 rounded-lg bg-black/30 placeholder-gray-300 outline-none focus:ring-2 focus:ring-sky-500" autocomplete="off" />
+          <div id="suggestions" class="absolute mt-1 left-0 right-0 bg-black/60 rounded-md overflow-hidden z-50 hidden"></div>
+        </div>
+        <button id="fetchBtn" class="p-3 rounded-lg bg-sky-500 hover:bg-sky-600 font-semibold">Get Weather</button>
+      </div>
+
+      <div id="status" class="text-sm mb-4 opacity-90"></div>
+
+      <section id="card" class="hidden rounded-xl p-4 bg-gradient-to-br from-white/3 to-white/2 border border-white/6 transform transition-all duration-300">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 id="locName" class="text-xl font-semibold"></h2>
+            <p id="locInfo" class="text-sm opacity-80"></p>
+          </div>
+          <div class="text-right">
+            <div id="temp" class="text-4xl font-bold flex items-center gap-3"></div>
+            <div id="conditions" class="text-sm opacity-80"></div>
+          </div>
+        </div>
+
+        <hr class="my-3 border-white/8">
+
+        <div id="hourly" class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm"></div>
+      </section>
+    </div>
+
+    <footer class="text-xs text-center mt-4 opacity-70">
+      Data from Open-Meteo • Deploy anywhere (Vercel ready)
+    </footer>
+  </main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function fmtTime(isoString){
+  try {
+    const d = new Date(isoString);
+    return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  } catch(e){
+    return isoString;
+  }
+}
+
+function cToF(c){return (c*9/5)+32;}
+function fToC(f){return (f-32)*5/9;}
+
+let unitIsF = false;
+$("unitToggle").addEventListener("change", (e)=> {
+  unitIsF = e.target.checked;
+  // if card visible, re-render last data if present
+  if (window.__lastData) renderWeather(window.__lastData);
+});
+
+async function suggest(query){
+  const sbox = $("suggestions");
+  if (!query) { sbox.classList.add("hidden"); sbox.innerHTML=""; return; }
+  try {
+    const res = await fetch(`/api/autocomplete?query=${encodeURIComponent(query)}&limit=6`);
+    if (!res.ok) return;
+    const arr = await res.json();
+    if (!arr || arr.length===0){ sbox.classList.add("hidden"); sbox.innerHTML=""; return; }
+    sbox.innerHTML = "";
+    arr.forEach(item=>{
+      const node = document.createElement("div");
+      node.className = "p-2 hover:bg-white/5 cursor-pointer";
+      node.innerHTML = `<div class="text-sm">${item.name}${item.country ? ", "+item.country : ""}${item.admin1 ? " • "+item.admin1 : ""}</div>`;
+      node.addEventListener("click", ()=> {
+        $("cityInput").value = item.name + (item.country ? ", "+item.country : "");
+        sbox.classList.add("hidden");
+        fetchWeather(null, item.latitude, item.longitude);
+      });
+      sbox.appendChild(node);
+    });
+    sbox.classList.remove("hidden");
+  } catch(e){
+    console.error("suggest error", e);
+  }
+}
+
+let suggestTimer = null;
+$("cityInput").addEventListener("input", (ev)=>{
+  const q = ev.target.value.trim();
+  if (suggestTimer) clearTimeout(suggestTimer);
+  suggestTimer = setTimeout(()=> suggest(q), 250);
+});
+
+async function fetchWeather(city=null, lat=null, lon=null){
+  $("status").textContent = "Loading…";
+  $("card").classList.add("hidden");
+  try {
+    let url;
+    if (lat !== null && lon !== null){
+      url = `/api/weather?lat=${lat}&lon=${lon}`;
+    } else {
+      const c = (city || $("cityInput").value).trim();
+      if (!c) { $("status").textContent = "Please enter a city."; return; }
+      url = `/api/weather?city=${encodeURIComponent(c)}`;
+    }
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({detail: res.statusText}));
+      $("status").textContent = `Error: ${err.detail || res.statusText}`;
+      return;
+    }
+    const data = await res.json();
+    window.__lastData = data;
+    renderWeather(data);
+    $("status").textContent = "";
+    $("card").classList.remove("hidden");
+  } catch (e) {
+    console.error(e);
+    $("status").textContent = "Network error or server error. See console for details.";
+  }
+}
+
+function renderWeather(data){
+  const loc = data.location;
+  $("locName").textContent = `${loc.name}${loc.country ? ", "+loc.country : ""}`;
+  $("locInfo").textContent = `Lat ${loc.latitude.toFixed(3)} • Lon ${loc.longitude.toFixed(3)} ${loc.admin1 ? "• "+loc.admin1 : ""}`;
+
+  const cur = data.current;
+  let tempC = cur.temperature;
+  let displayTemp = Math.round(unitIsF ? cToF(tempC) : tempC);
+  const unit = unitIsF ? "°F" : "°C";
+  $("temp").innerHTML = `<span>${displayTemp}${unit}</span><span class="text-2xl opacity-80">${data.weather_icon || ""}</span>`;
+  $("conditions").textContent = `${data.weather_desc || ""} • Wind ${cur.windspeed} m/s`;
+
+  const hourly = data.hourly || {};
+  const times = hourly.time || [];
+  const keys = Object.keys(hourly).filter(k => k !== "time");
+  const hourlyRoot = $("hourly");
+  hourlyRoot.innerHTML = "";
+
+  const limit = Math.min(times.length, 8);
+  for (let i = 0; i < limit; i++){
+    const t = times[i];
+    const parts = [];
+    keys.forEach(k => {
+      const val = hourly[k] && hourly[k][i];
+      if (val === undefined) return;
+      if (k === "temperature_2m") {
+        const v = unitIsF ? Math.round(cToF(val)) + "°F" : Math.round(val) + "°C";
+        parts.push(v);
+      }
+      else if (k === "relativehumidity_2m") parts.push(`${Math.round(val)}%`);
+      else if (k === "windspeed_10m") parts.push(`${Math.round(val)} m/s`);
+      else parts.push(`${k}: ${val}`);
+    });
+
+    const node = document.createElement("div");
+    node.className = "p-3 bg-black/20 rounded-md";
+    node.innerHTML = `<div class="text-xs opacity-80">${fmtTime(t)}</div><div class="text-sm font-medium">${parts.join(" • ")}</div>`;
+    hourlyRoot.appendChild(node);
+  }
+}
+
+// fetch button
+$("fetchBtn").addEventListener("click", ()=> {
+  const city = $("cityInput").value.trim();
+  if (!city) {
+    $("status").textContent = "Please enter a city name.";
+    return;
+  }
+  fetchWeather(city);
+});
+
+// allow enter key
+$("cityInput").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") $("fetchBtn").click();
+});
+</script>
+</body>
+</html>
